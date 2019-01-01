@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -536,6 +537,78 @@ func (a StringArray) Value() (driver.Value, error) {
 		for i := 1; i < n; i++ {
 			b = append(b, ',')
 			b = appendArrayQuotedBytes(b, []byte(a[i]))
+		}
+
+		return string(append(b, '}')), nil
+	}
+
+	return "{}", nil
+}
+
+// JsonbArray represents a one-dimensional array of the PostgreSQL character types.
+type JsonbArray []map[string]interface{}
+
+// Scan implements the sql.Scanner interface.
+func (a *JsonbArray) Scan(src interface{}) error {
+	switch src := src.(type) {
+	case []byte:
+		return a.scanBytes(src)
+	case string:
+		return a.scanBytes([]byte(src))
+	case nil:
+		*a = nil
+		return nil
+	}
+
+	return fmt.Errorf("pq: cannot convert %T to JsonbArray", src)
+}
+
+func (a *JsonbArray) scanBytes(src []byte) error {
+	elems, err := scanLinearArray(src, []byte{','}, "JsonbArray")
+	if err != nil {
+		return err
+	}
+	if *a != nil && len(elems) == 0 {
+		*a = (*a)[:0]
+	} else {
+		b := make(JsonbArray, len(elems))
+		for i, v := range elems {
+			jsonb := make(map[string]interface{})
+			err := json.Unmarshal(v, &jsonb)
+			b[i] = jsonb
+
+			if err != nil {
+				return fmt.Errorf("pq: parsing array element index %d: cannot convert to jsonb", i)
+			}
+		}
+		*a = b
+	}
+	return nil
+}
+
+// Value implements the driver.Valuer interface.
+func (a JsonbArray) Value() (driver.Value, error) {
+	if a == nil {
+		return nil, nil
+	}
+
+	if n := len(a); n > 0 {
+		// There will be at least two curly brackets, 2*N bytes of quotes,
+		// and N-1 bytes of delimiters.
+		b := make([]byte, 1, 1+3*n)
+		b[0] = '{'
+		valueString, err := json.Marshal(a[0])
+		if err != nil {
+			return nil, err
+		}
+		b = appendArrayQuotedBytes(b, []byte(valueString))
+		for i := 1; i < n; i++ {
+			b = append(b, ',')
+			valueString, err = json.Marshal(a[0])
+			if err != nil {
+				return nil, err
+			}
+			b = appendArrayQuotedBytes(b, []byte(valueString))
 		}
 
 		return string(append(b, '}')), nil
